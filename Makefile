@@ -6,8 +6,9 @@ CC = g++
 
 all:
 	$(CC) $(CFLAGS) main.cpp -o main
+	$(CC) $(CFLAGS) raw_socket_parse.cpp -o raw_socket_parse
 
 run:
 	./main
 clean:
-	rm -rf main
+	rm -rf main raw_socket_parse 

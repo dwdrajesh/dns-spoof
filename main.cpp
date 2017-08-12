@@ -87,7 +87,7 @@ void ChangetoDnsNameFormat(unsigned char* dns,unsigned char* host)
     *dns++='\0';
 }
 
-u_char* ReadName(unsigned char* reader,unsigned char* buffer,int* count)
+u_char* ReadName(unsigned char* reader, unsigned char* buffer, int* count)
 {
     unsigned char *name;
     unsigned int p=0,jumped=0,offset;
