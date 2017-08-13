@@ -5,15 +5,13 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/udp.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
 
-#include<netinet/ip.h> // ip header
-#include<netinet/udp.h> 
-#include <linux/if_ether.h>
+#include<netinet/ip.h> // iphdr
+#include<netinet/udp.h> // udphdr
+#include <linux/if_ether.h> // ethhdr
 
 
 // Custom headers
@@ -96,7 +94,7 @@ typedef struct
 /////////////////////////////////
 
 unsigned int createSpoofDNS(int *newNameLen, char * orgBuffer, char * Buffer, 
-	DNS_HEADER * spoofDNSHeader, DNS_HEADER * dnsHeader); 
+DNS_HEADER * spoofDNSHeader, DNS_HEADER * dnsHeader); 
 DNS_HEADER * dnsHeader = (DNS_HEADER *)malloc(sizeof(DNS_HEADER));
 struct ethhdr * eHeader = (struct ethhdr *) malloc(sizeof(struct ethhdr));
 struct iphdr * ipHeader = (struct iphdr *) malloc(sizeof(struct iphdr));
