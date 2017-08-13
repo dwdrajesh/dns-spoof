@@ -51,10 +51,10 @@ typedef struct
 #pragma pack(push, 1)
 typedef struct
 {
-unsigned short type;
-unsigned short _class;
-unsigned int ttl; // ttl is 32 bits
-unsigned short data_len;
+	unsigned short type;
+	unsigned short _class;
+	unsigned int ttl; // ttl is 32 bits
+	unsigned short data_len;
 } RR_CONSTANT_FIELD;
 #pragma pack(pop)
 
@@ -67,7 +67,7 @@ typedef struct
 } RES_RECORD;
 
 
-void ChangetoDnsNameFormat(unsigned char* dns,unsigned char* host) 
+void ChangetoDnsNameFormat(unsigned char* dns,unsigned char* host)
 {
     int lock = 0 , i;
     strcat((char*)host,".");
